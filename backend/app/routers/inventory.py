@@ -11,6 +11,16 @@ from app.schemas.inventory import (
     InventoryUpdate,
     StockMovement,
 )
+from app.models.inventory_movement import (
+
+    InventoryMovement,
+
+    MovementType,
+
+)
+from app.schemas.inventory_movement import (
+    InventoryMovementResponse,
+)
 
 
 # =========================================================
@@ -226,12 +236,8 @@ def update_inventory(
 
 # POST /inventory/{inventory_id}/stock-in
 #
-# Adds new stock to an existing inventory record.
-#
-# Example:
-# Current stock = 75
-# Stock in     = 20
-# New stock    = 95
+# Adds stock to the inventory AND records the movement
+# in inventory_movements for audit/history purposes.
 @router.post(
     "/{inventory_id}/stock-in",
     response_model=InventoryResponse,
@@ -241,29 +247,38 @@ def stock_in(
     movement: StockMovement,
     db: Session = Depends(get_db),
 ):
-    # Find the inventory record using its ID.
+    # Find the inventory record.
     inventory = db.query(Inventory).filter(
         Inventory.id == inventory_id
     ).first()
 
-    # If inventory does not exist, return 404.
+    # Inventory does not exist.
     if inventory is None:
         raise HTTPException(
             status_code=404,
             detail="Inventory not found",
         )
 
-    # Add the incoming stock to the current quantity.
-    #
-    # Example:
-    # 75 + 20 = 95
+    # Add the incoming quantity to current stock.
     inventory.quantity += movement.quantity
 
-    # Save the new quantity to PostgreSQL.
+    # Create a history record for this stock movement.
+    movement_record = InventoryMovement(
+        inventory_id=inventory.id,
+        type=MovementType.IN,
+        quantity=movement.quantity,
+    )
+
+    # Add the movement record to the same transaction.
+    db.add(movement_record)
+
+    # Save BOTH changes together:
+    #
+    # 1. Updated inventory quantity
+    # 2. New movement history record
     db.commit()
 
-    # Reload the inventory so updated_at and other
-    # database values are refreshed.
+    # Reload the inventory with the latest database values.
     db.refresh(inventory)
 
     return inventory
@@ -274,12 +289,8 @@ def stock_in(
 
 # POST /inventory/{inventory_id}/stock-out
 #
-# Removes stock from an inventory record.
-#
-# Example:
-# Current stock = 95
-# Stock out    = 15
-# New stock    = 80
+# Removes stock from inventory AND records the movement
+# in inventory_movements.
 @router.post(
     "/{inventory_id}/stock-out",
     response_model=InventoryResponse,
@@ -289,38 +300,99 @@ def stock_out(
     movement: StockMovement,
     db: Session = Depends(get_db),
 ):
-    # Find the inventory record using its ID.
+    # Find the inventory record.
     inventory = db.query(Inventory).filter(
         Inventory.id == inventory_id
     ).first()
 
-    # If inventory does not exist, return 404.
+    # Inventory does not exist.
     if inventory is None:
         raise HTTPException(
             status_code=404,
             detail="Inventory not found",
         )
 
-    # Make sure we have enough stock before removing it.
-    #
-    # Example:
-    # Current stock = 10
-    # Requested out = 15
-    #
-    # 15 > 10 → Not enough stock ❌
+    # Make sure enough stock is available.
     if movement.quantity > inventory.quantity:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Insufficient stock",
         )
 
-    # Remove the requested quantity from current stock.
+    # Remove the requested quantity.
     inventory.quantity -= movement.quantity
 
-    # Save the updated quantity.
+    # Create a history record for this stock-out operation.
+    movement_record = InventoryMovement(
+        inventory_id=inventory.id,
+        type=MovementType.OUT,
+        quantity=movement.quantity,
+    )
+
+    # Add the movement record to the transaction.
+    db.add(movement_record)
+
+    # Save both:
+    # 1. Updated inventory quantity
+    # 2. New OUT movement history
     db.commit()
 
     # Reload the latest database values.
     db.refresh(inventory)
 
     return inventory
+
+# =========================================================
+# GET INVENTORY MOVEMENT HISTORY
+# =========================================================
+
+# GET /inventory/{inventory_id}/movements
+#
+# Returns the complete stock movement history
+# for one inventory record.
+#
+# Example:
+#
+# Inventory #1
+#     ├── IN  +10
+#     ├── OUT -10
+#     └── IN  +20
+#
+# The quantity stored in history is always positive.
+# The "type" tells us whether stock came in or went out.
+@router.get(
+    "/{inventory_id}/movements",
+    response_model=list[InventoryMovementResponse],
+)
+def get_inventory_movements(
+    inventory_id: int,
+    db: Session = Depends(get_db),
+):
+    # -----------------------------------------------------
+    # Step 1: Make sure the inventory exists.
+    # -----------------------------------------------------
+    inventory = db.query(Inventory).filter(
+        Inventory.id == inventory_id
+    ).first()
+
+    if inventory is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Inventory not found",
+        )
+
+    # -----------------------------------------------------
+    # Step 2: Get all movements belonging to this inventory.
+    #
+    # order_by() makes the oldest movement appear first.
+    # -----------------------------------------------------
+    movements = (
+        db.query(InventoryMovement)
+        .filter(
+            InventoryMovement.inventory_id == inventory_id
+        )
+        .order_by(InventoryMovement.id.asc())
+        .all()
+    )
+
+    return movements

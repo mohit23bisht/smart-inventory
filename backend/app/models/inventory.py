@@ -7,6 +7,8 @@ from app.models.base import Base
 from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from app.models.product import Product
+    from app.models.inventory_movement import InventoryMovement
+
 
 class Inventory(Base):
     __tablename__ = "inventory"
@@ -42,3 +44,23 @@ class Inventory(Base):
     product: Mapped["Product"] = relationship(
     back_populates="inventory"
 )
+    # =========================================================
+    # INVENTORY MOVEMENT RELATIONSHIP
+    # =========================================================
+    # One inventory record can have many stock movements.
+    #
+    # Example:
+    #
+    # Inventory #1
+    #     ├── Movement #1 → IN  +50
+    #     ├── Movement #2 → OUT -10
+    #     ├── Movement #3 → IN  +20
+    #     └── Movement #4 → OUT -5
+    #
+    # We can access these through:
+    #
+    # inventory.movements
+    movements: Mapped[list["InventoryMovement"]] = relationship(
+    back_populates="inventory"
+)
+
