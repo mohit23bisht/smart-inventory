@@ -101,3 +101,27 @@ class StockMovement(BaseModel):
     quantity: int = Field(
         gt=0,
     )
+
+# =========================================================
+# INVENTORY SUMMARY RESPONSE
+# =========================================================
+# Provides a quick summary of an inventory record.
+#
+# This is useful for dashboards and reports because the
+# frontend does not need to make multiple API requests.
+class InventorySummaryResponse(BaseModel):
+
+    # Inventory record ID.
+    inventory_id: int
+
+    # Product associated with this inventory.
+    product_id: int
+
+    # Current quantity available in inventory.
+    current_stock: int
+
+    # Total quantity ever added through stock-in operations.
+    total_stock_in: int
+
+    # Total quantity ever removed through stock-out operations.
+    total_stock_out: int

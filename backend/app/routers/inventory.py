@@ -1,6 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from app.database import get_db
 from app.models.inventory import Inventory
@@ -8,6 +9,7 @@ from app.models.product import Product
 from app.schemas.inventory import (
     InventoryCreate,
     InventoryResponse,
+    InventorySummaryResponse,
     InventoryUpdate,
     StockMovement,
 )
@@ -118,18 +120,56 @@ def create_inventory(
 # GET /inventory/
 #
 # Returns all inventory records.
+
 @router.get(
     "/",
     response_model=list[InventoryResponse],
 )
 def get_inventory(
+    skip: int = 0,
+    limit: int = 20,
     db: Session = Depends(get_db),
 ):
-    # Fetch all inventory records from PostgreSQL.
-    inventory = db.query(Inventory).all()
+    # -----------------------------------------------------
+    # Pagination
+    # -----------------------------------------------------
+    # skip:
+    # Number of records to skip.
+    #
+    # limit:
+    # Maximum number of records to return.
+    #
+    # Example:
+    #
+    # /inventory/?skip=0&limit=20
+    # → first 20 records
+    #
+    # /inventory/?skip=20&limit=20
+    # → next 20 records
+
+    # Prevent negative pagination values.
+    if skip < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="skip cannot be negative",
+        )
+
+    # Prevent excessively large responses.
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be between 1 and 100",
+        )
+
+    # Fetch only the requested portion of inventory.
+    inventory = (
+        db.query(Inventory)
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
     return inventory
-
 
 # =========================================================
 # GET SINGLE INVENTORY
@@ -343,33 +383,118 @@ def stock_out(
     return inventory
 
 # =========================================================
+# INVENTORY SUMMARY
+# =========================================================
+
+# GET /inventory/{inventory_id}/summary
+#
+# Returns:
+# - Current stock
+# - Total stock added
+# - Total stock removed
+#
+# This endpoint is useful for dashboards and reports.
+@router.get(
+    "/{inventory_id}/summary",
+    response_model=InventorySummaryResponse,
+)
+def get_inventory_summary(
+    inventory_id: int,
+    db: Session = Depends(get_db),
+):
+    # -----------------------------------------------------
+    # Step 1: Find the inventory record.
+    # -----------------------------------------------------
+    inventory = db.query(Inventory).filter(
+        Inventory.id == inventory_id
+    ).first()
+
+    # Inventory does not exist.
+    if inventory is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Inventory not found",
+        )
+
+    # -----------------------------------------------------
+    # Step 2: Calculate total stock IN.
+    #
+    # Only movements with type = IN are included.
+    # -----------------------------------------------------
+    total_stock_in = (
+        db.query(
+            func.coalesce(
+                func.sum(InventoryMovement.quantity),
+                0,
+            )
+        )
+        .filter(
+            InventoryMovement.inventory_id == inventory_id,
+            InventoryMovement.type == MovementType.IN,
+        )
+        .scalar()
+    )
+
+    # -----------------------------------------------------
+    # Step 3: Calculate total stock OUT.
+    #
+    # Only movements with type = OUT are included.
+    # -----------------------------------------------------
+    total_stock_out = (
+        db.query(
+            func.coalesce(
+                func.sum(InventoryMovement.quantity),
+                0,
+            )
+        )
+        .filter(
+            InventoryMovement.inventory_id == inventory_id,
+            InventoryMovement.type == MovementType.OUT,
+        )
+        .scalar()
+    )
+
+    # -----------------------------------------------------
+    # Step 4: Return the inventory summary.
+    # -----------------------------------------------------
+    return InventorySummaryResponse(
+        inventory_id=inventory.id,
+        product_id=inventory.product_id,
+        current_stock=inventory.quantity,
+        total_stock_in=total_stock_in,
+        total_stock_out=total_stock_out,
+    )
+
+# =========================================================
 # GET INVENTORY MOVEMENT HISTORY
 # =========================================================
 
 # GET /inventory/{inventory_id}/movements
 #
-# Returns the complete stock movement history
-# for one inventory record.
+# Returns movement history for one inventory record.
 #
-# Example:
+# Supports:
+# - Pagination
+# - Filtering by movement type
 #
-# Inventory #1
-#     ├── IN  +10
-#     ├── OUT -10
-#     └── IN  +20
+# Examples:
 #
-# The quantity stored in history is always positive.
-# The "type" tells us whether stock came in or went out.
+# /inventory/1/movements
+# /inventory/1/movements?type=IN
+# /inventory/1/movements?type=OUT
 @router.get(
     "/{inventory_id}/movements",
     response_model=list[InventoryMovementResponse],
 )
 def get_inventory_movements(
     inventory_id: int,
+    skip: int = 0,
+    limit: int = 20,
+    movement_type: MovementType | None = None,
     db: Session = Depends(get_db),
 ):
     # -----------------------------------------------------
-    # Step 1: Make sure the inventory exists.
+    # Step 1: Check that the inventory exists.
     # -----------------------------------------------------
     inventory = db.query(Inventory).filter(
         Inventory.id == inventory_id
@@ -382,16 +507,52 @@ def get_inventory_movements(
         )
 
     # -----------------------------------------------------
-    # Step 2: Get all movements belonging to this inventory.
+    # Step 2: Validate pagination.
+    # -----------------------------------------------------
+    if skip < 0:
+        raise HTTPException(
+            status_code=400,
+            detail="skip cannot be negative",
+        )
+
+    if limit < 1 or limit > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="limit must be between 1 and 100",
+        )
+
+    # -----------------------------------------------------
+    # Step 3: Start the movement query.
+    # -----------------------------------------------------
+    query = db.query(InventoryMovement).filter(
+        InventoryMovement.inventory_id == inventory_id
+    )
+
+    # -----------------------------------------------------
+    # Step 4: Apply movement type filter if provided.
     #
-    # order_by() makes the oldest movement appear first.
+    # movement_type = IN
+    #     → only IN records
+    #
+    # movement_type = OUT
+    #     → only OUT records
+    #
+    # movement_type = None
+    #     → all records
+    # -----------------------------------------------------
+    if movement_type is not None:
+        query = query.filter(
+            InventoryMovement.type == movement_type
+        )
+
+    # -----------------------------------------------------
+    # Step 5: Order and paginate the results.
     # -----------------------------------------------------
     movements = (
-        db.query(InventoryMovement)
-        .filter(
-            InventoryMovement.inventory_id == inventory_id
-        )
+        query
         .order_by(InventoryMovement.id.asc())
+        .offset(skip)
+        .limit(limit)
         .all()
     )
 
