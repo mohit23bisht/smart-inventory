@@ -38,6 +38,11 @@ class Product(Base):
         nullable=False,
     )
 
+    low_stock_threshold: Mapped[int] = mapped_column(
+    nullable=False,
+    default=10,
+)
+
     category: Mapped["Category"] = relationship(
 
         back_populates="products"
