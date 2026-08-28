@@ -1,15 +1,26 @@
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, func
+from sqlalchemy import DateTime, Enum as SQLEnum, ForeignKey, Numeric, String, func
 from sqlalchemy.orm import Mapped, mapped_column,relationship
 
 from app.models.base import Base
 from app.models.user import User
+from enum import Enum
+
 from typing import TYPE_CHECKING
+
 if TYPE_CHECKING:
     from app.models.customer import Customer
     from app.models.sale_item import SaleItem
+
+# =========================================================
+# SALE STATUS
+# =========================================================
+# Defines the allowed states of a sale.
+class SaleStatus(str, Enum):
+    ACTIVE = "ACTIVE"
+    CANCELLED = "CANCELLED"
 
 class Sale(Base):
     __tablename__ = "sales"
@@ -39,6 +50,18 @@ class Sale(Base):
         nullable=False,
     )
 
+    # =========================================================
+    # SALE STATUS
+    # =========================================================
+    # Only ACTIVE or CANCELLED values are allowed.
+    status: Mapped[SaleStatus] = mapped_column(
+    SQLEnum(
+        SaleStatus,
+        name="salestatus",
+    ),
+    nullable=False,
+    default=SaleStatus.ACTIVE,
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         server_default=func.now(),
